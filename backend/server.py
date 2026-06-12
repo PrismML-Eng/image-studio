@@ -44,12 +44,15 @@ log = logging.getLogger(__name__)
 
 
 def _parse_truthy(value: str | None) -> bool:
+    """Parse common environment variable truthy values."""
     return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 # Force-disable is read once at module load: server restart is the override path.
 # Per-session UI overrides ride on the ?force_disable=1 query param instead.
 _FORCE_DISABLE_GPU_AT_LOAD: bool = _parse_truthy(os.getenv("MFLUX_STUDIO_FORCE_DISABLE_GPU"))
+# Backend health is commonly requested by the frontend, so keep the probe result
+# briefly cached instead of repeatedly hitting the remote GPU health endpoint.
 _BACKENDS_PROBE_TTL_SECONDS: float = float(
     os.getenv("MFLUX_STUDIO_BACKENDS_PROBE_TTL_SECONDS", "30")
 )
@@ -60,10 +63,12 @@ _backends_cache: dict[tuple[bool, BackendKind], tuple[float, dict]] = {}
 
 
 def _clear_backends_cache() -> None:
+    """Clear cached backend metadata, mainly for tests."""
     _backends_cache.clear()
 
 
 def _probe_gpu(host: str, token: str) -> tuple[bool, str | None]:
+    """Check whether the configured remote GPU worker is reachable."""
     try:
         resp = httpx.get(
             f"{host.rstrip('/')}/healthz",
@@ -98,6 +103,7 @@ def _resolve_backends(
         else:
             healthy, reason = _probe_gpu(gpu_host, gpu_token)
     else:
+        # Local MLX backends do not depend on a remote health endpoint.
         healthy, reason = True, None
 
     kind_backends = [b for b in BACKENDS if BACKEND_TO_KIND[b] == pipeline_kind]
@@ -118,6 +124,7 @@ def _resolve_backends(
 def _get_backends_payload(
     force_disable_query: bool, pipeline_kind: BackendKind, current_backend: Backend
 ) -> dict:
+    """Return backend metadata, using a short TTL cache for health checks."""
     effective = _FORCE_DISABLE_GPU_AT_LOAD or force_disable_query
     cache_key = (effective, pipeline_kind)
     cached = _backends_cache.get(cache_key)
