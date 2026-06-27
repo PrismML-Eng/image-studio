@@ -145,18 +145,27 @@ class GenerateRequest(BaseModel):
     seed: int = DEFAULT_SEED
     steps: int = Field(default=DEFAULT_STEPS, ge=1)
     guidance: float = Field(default=DEFAULT_GUIDANCE, ge=0.0)
+    # Optional for backward compatibility: if omitted, the current resident
+    # pipeline backend is reused.
     backend: Backend | SkipJsonSchema[None] = Field(default=None)
     height: int = Field(default=DEFAULT_HEIGHT, ge=16)
     width: int = Field(default=DEFAULT_WIDTH, ge=16)
+    # Optional model override for local MLX pipeline runs. Ignored when the server
+    # is running in remote-GPU mode.
     model_path: str | None = Field(default=None)
+    # None means "use the pipeline/server default"; True or False overrides the
+    # VAE tiling behavior for this request only.
     tiled_vae: bool | None = Field(default=None)
     max_sequence_length: int | None = Field(default=None, ge=1)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Create the resident pipeline once and clean it up on shutdown."""
     pipeline = make_pipeline(PipelineConfig.from_env())
     app.state.pipeline = pipeline
+    # Local MLX swaps must be serialized because the process owns one resident
+    # in-memory model at a time.
     app.state.swap_lock = asyncio.Lock()
     try:
         yield
@@ -171,6 +180,8 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/backends")
 async def get_backends(force_disable: bool = False) -> dict:
     pipeline: FluxPipeline | RemoteGpuPipeline = app.state.pipeline
+    # The active pipeline determines which backend kind this server process can
+    # actually serve.
     pipeline_kind: BackendKind = "gemlite" if pipeline.is_remote else "mlx"
     return _get_backends_payload(
         force_disable_query=force_disable,
@@ -199,6 +210,8 @@ async def get_backends(force_disable: bool = False) -> dict:
 async def generate(request: GenerateRequest) -> Response:
     pipeline: FluxPipeline | RemoteGpuPipeline = app.state.pipeline
     lock: asyncio.Lock = app.state.swap_lock
+    # If the caller does not specify a backend, keep using the pipeline's
+    # current resident backend instead of forcing an unnecessary model swap.
     target_backend: Backend = request.backend if request.backend is not None else pipeline.backend
     if target_backend not in BACKENDS:
         raise HTTPException(status_code=400, detail=f"Unknown backend {target_backend!r}.")
@@ -226,6 +239,7 @@ async def generate(request: GenerateRequest) -> Response:
             )
             wall_seconds = time.perf_counter() - gen_start
             headers = {"X-Wall-Seconds": f"{wall_seconds:.3f}"}
+            # Surface memory telemetry when the pipeline records it.
             if pipeline.last_peak_memory_mb is not None:
                 headers["X-Peak-Memory-MB"] = f"{pipeline.last_peak_memory_mb:.1f}"
             return Response(
@@ -235,6 +249,8 @@ async def generate(request: GenerateRequest) -> Response:
             )
         finally:
             if not pipeline.is_remote:
+                # Release MLX cached allocations after each local render so the
+                # next request starts with a lower memory watermark.
                 mx.clear_cache()
                 gc.collect()
 
