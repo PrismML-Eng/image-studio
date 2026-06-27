@@ -150,8 +150,8 @@ class GenerateRequest(BaseModel):
     backend: Backend | SkipJsonSchema[None] = Field(default=None)
     height: int = Field(default=DEFAULT_HEIGHT, ge=16)
     width: int = Field(default=DEFAULT_WIDTH, ge=16)
-    # Allows local callers to point at a specific model without changing the
-    # process-wide default configuration.
+    # Optional model override for local MLX pipeline runs. Ignored when the server
+    # is running in remote-GPU mode.
     model_path: str | None = Field(default=None)
     # None means "use the pipeline/server default"; True or False overrides the
     # VAE tiling behavior for this request only.
